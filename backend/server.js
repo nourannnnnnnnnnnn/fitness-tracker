@@ -2,188 +2,282 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 require('dotenv').config();
+const multer = require('multer');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+// Models
 const Meal = require('./models/Meal');
-// Ensure you created this file at backend/models/Workout.js!
 const Workout = require('./models/Workout'); 
+const User = require('./models/User');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Connect to MongoDB Atlas
+// Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('Successfully connected to MongoDB!'))
     .catch((err) => console.error('MongoDB connection error:', err));
 
-// GET Route: Fetch all workouts
+// --- AUTH ROUTES ---
+app.post('/api/register', async (req, res) => {
+    try {
+        const { name, email, password, role } = req.body;
+        const existingUser = await User.findOne({ email });
+        if (existingUser) return res.status(400).json({ error: "Email already in use" });
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const newUser = new User({ 
+            name, email, password: hashedPassword, role: role || 'user' 
+        });
+        await newUser.save();
+        res.status(201).json({ message: "User created successfully!" });
+    } catch (err) { res.status(500).json({ error: "Registration failed" }); }
+});
+
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const user = await User.findOne({ email });
+        if (!user) return res.status(400).json({ error: "Invalid email or password" });
+
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) return res.status(400).json({ error: "Invalid email or password" });
+
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        res.json({ token, role: user.role, email: user.email, message: "Logged in!" });
+    } catch (err) { res.status(500).json({ error: "Login failed" }); }
+});
+
+// --- WORKOUT ROUTES ---
 app.get('/api/workouts', async (req, res) => {
     try {
         const workouts = await Workout.find().sort({ date: -1 }); 
         res.json(workouts);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch workouts' });
-    }
+    } catch (err) { res.status(500).json({ error: 'Failed to fetch workouts' }); }
 });
 
-// POST Route: Save a new workout
 app.post('/api/workouts', async (req, res) => {
     try {
         const newWorkout = new Workout(req.body);
-        const savedWorkout = await newWorkout.save();
-        res.status(201).json(savedWorkout);
-    } catch (err) {
-        res.status(400).json({ error: 'Failed to save workout' });
-    }
+        await newWorkout.save();
+        res.status(201).json(newWorkout);
+    } catch (err) { res.status(400).json({ error: 'Failed to save workout' }); }
 });
 
-// DELETE Route: Remove a workout by ID
-app.delete('/api/workouts/:id', async (req, res) => {
+// --- COMMUNITY DISCOVERY & TEXT REVIEWS SEARCH ---
+app.get('/api/meals/search', async (req, res) => {
     try {
-        const { id } = req.params;
-        await Workout.findByIdAndDelete(id);
-        res.status(200).json({ message: 'Workout deleted successfully' });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to delete workout' });
-    }
-});
-// --- Add these imports at the top ---
-const User = require('./models/User');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+        const searchQuery = req.query.q || ""; 
+        console.log(`Incoming meal search query parameter: "${searchQuery}"`);
 
+        const meals = await Meal.find({
+            name: { $regex: searchQuery, $options: 'i' }
+        }).limit(12);
 
-// --- Add these routes right above app.listen(PORT...) ---
-
-// REGISTER Route
-app.post('/api/register', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        
-        // 1. Check if user already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) return res.status(400).json({ error: "Email already in use" });
-
-        // 2. Hash the password for security
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-
-        // 3. Save the new user
-        const newUser = new User({ email, password: hashedPassword });
-        await newUser.save();
-
-        res.status(201).json({ message: "User created successfully!" });
-    } catch (err) {
-        res.status(500).json({ error: "Server error during registration" });
-    }
-});
-
-// LOGIN Route
-app.post('/api/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-
-        // 1. Find the user
-        const user = await User.findOne({ email });
-        if (!user) return res.status(400).json({ error: "Invalid email or password" });
-
-        // 2. Check the password
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return res.status(400).json({ error: "Invalid email or password" });
-
-        // 3. Create the VIP token (JSON Web Token)
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-        res.json({ token, message: "Logged in successfully!" });
-    } catch (err) {
-        res.status(500).json({ error: "Server error during login" });
-    }
-});
-
-// POST Route: Calculate BMI and Generate Diet Plan
-// POST Route: Calculate BMI and Generate DYNAMIC Diet Plan
-app.post('/api/profile/plan', async (req, res) => {
-    try {
-        const { name, age, weight, height, goal } = req.body;
-
-        // 1. Calculate BMI
-        const heightInMeters = height / 100;
-        const bmi = (weight / (heightInMeters * heightInMeters)).toFixed(1);
-
-        // 2. Determine BMI Category
-        let category = 'Normal weight';
-        if (bmi < 18.5) category = 'Underweight';
-        else if (bmi >= 25 && bmi < 29.9) category = 'Overweight';
-        else if (bmi >= 30) category = 'Obese';
-
-        // 3. The Query Algorithm: Fetch 1 random meal from the database
-        const fetchRandomMeal = async (mealType) => {
-            const result = await Meal.aggregate([
-                { $match: { goal: goal, type: mealType } }, // Match the goal and time of day
-                { $sample: { size: 1 } }                    // Grab exactly 1 at random
-            ]);
+        const adaptedMeals = meals.map(meal => {
+            const ratings = meal.ratings || [];
             
-            // If the database is empty, provide a fallback string so the app doesn't crash
-            return result.length > 0 ? result[0].name : "Standard healthy option (Database Empty)";
-        };
+            // Build custom descriptive review sentences: "username rated this X stars"
+            const userReviews = ratings.map(r => {
+                const username = r.email ? r.email.split('@')[0] : "Anonymous";
+                return `${username} rated this ${r.score} stars`;
+            });
 
-        // 4. Build the dynamic plan
-        const dailyPlan = {
-            breakfast: await fetchRandomMeal('breakfast'),
-            lunch: await fetchRandomMeal('lunch'),
-            dinner: await fetchRandomMeal('dinner'),
-            snacks: await fetchRandomMeal('snack')
-        };
+            return {
+                ...meal._doc,
+                reviewsList: userReviews, 
+                totalVotes: ratings.length
+            };
+        });
 
-        // Send the complete package back to the frontend
-        res.json({ bmi, category, plan: dailyPlan });
-
+        res.json(adaptedMeals);
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to generate dynamic plan' });
+        console.error("Search failed:", err);
+        res.status(500).json({ error: "Search execution failure" });
     }
 });
-// TEMPORARY ROUTE: Run this ONCE to fill your database with dynamic meals
-// TEMPORARY ROUTE: Run this ONCE to fill your database with dynamic meals
-// THE BULLETPROOF SEED ROUTE (Nuke & Pave)
-// CHANGED TO GET: Now you can just visit this link in your browser!
+
+// --- TRANSACTIONAL RATING & REVIEW ENGINE (FIXED INSTANT SYNC) ---
+app.post('/api/meals/rate', async (req, res) => {
+    try {
+        const { email, mealId, score } = req.body;
+        console.log(`Review post received - Email: [${email}], Meal: [${mealId}], Score: [${score}]`);
+
+        if (!email || !mealId || score === undefined) {
+            return res.status(400).json({ error: "Missing required parameters: email, mealId, or score." });
+        }
+
+        const meal = await Meal.findById(mealId);
+        if (!meal) return res.status(404).json({ error: "Meal document not found" });
+
+        const cleanEmail = email.trim().toLowerCase();
+        
+        if (!meal.ratings) {
+            meal.ratings = [];
+        }
+
+        const existingIndex = meal.ratings.findIndex(r => r.email === cleanEmail);
+        
+        if (existingIndex >= 0) { 
+            meal.ratings[existingIndex].score = Number(score); 
+        } else { 
+            meal.ratings.push({ email: cleanEmail, score: Number(score) }); 
+        }
+
+        // Explicitly notify Mongoose that the nested array properties have altered
+        meal.markModified('ratings');
+        
+        // Enforce await constraint to fully finalize database indexing changes before response delivery
+        await meal.save();
+        console.log("Review committed to MongoDB successfully!");
+
+        // Build a fresh text reviews array using the newly updated data block
+        const freshReviewsList = meal.ratings.map(r => {
+            const username = r.email ? r.email.split('@')[0] : "Anonymous";
+            return `${username} rated this ${r.score} stars`;
+        });
+
+        // Send back the brand new attributes directly in the payload to allow instant UI mutations
+        res.json({ 
+            message: "Review updated successfully!",
+            reviewsList: freshReviewsList,
+            totalVotes: meal.ratings.length
+        });
+
+    } catch (err) { 
+        console.error("Rating database transaction failed:", err);
+        res.status(500).json({ error: "Rating failed due to server error" }); 
+    }
+});
+
+// --- WISHLIST TOGGLE INTERACTION CONTROLLER ---
+app.post('/api/favorites/toggle', async (req, res) => {
+    try {
+        const { email, mealId } = req.body;
+        console.log(`Wishlist transaction request for: [${email}] on Item ID: [${mealId}]`);
+
+        if (!email || !mealId) {
+            return res.status(400).json({ error: "Missing required tracking parameters." });
+        }
+
+        const cleanEmail = email.trim().toLowerCase();
+        const user = await User.findOne({ email: cleanEmail });
+        
+        if (!user) {
+            return res.status(404).json({ error: "User profile record not found." });
+        }
+
+        if (!user.favoriteMeals) {
+            user.favoriteMeals = [];
+        }
+
+        // Structural ObjectId evaluation casting constraint guard
+        const mealIndex = user.favoriteMeals.findIndex(id => id.toString() === mealId.toString());
+
+        if (mealIndex >= 0) {
+            user.favoriteMeals.splice(mealIndex, 1);
+            await user.save();
+            return res.json({ message: "Removed from Wishlist", isFavorite: false });
+        } else {
+            user.favoriteMeals.push(mealId);
+            await user.save();
+            return res.json({ message: "Saved to Wishlist!", isFavorite: true });
+        }
+    } catch (err) {
+        console.error("Wishlist toggle fail:", err);
+        res.status(500).json({ error: "Internal crash handling favorites array updates." });
+    }
+});
+
+// --- WISHLIST ARRAY POPULATION VIEW ROUTE ---
+app.get('/api/favorites/:email', async (req, res) => {
+    try {
+        const cleanEmail = req.params.email.trim().toLowerCase();
+        const user = await User.findOne({ email: cleanEmail }).populate('favoriteMeals');
+        
+        if (!user) return res.status(404).json({ error: "User not found" });
+        res.json(user.favoriteMeals || []);
+    } catch (err) {
+        res.status(500).json({ error: "Populate failed" });
+    }
+});
+
+// --- SMART PLAN ROUTE ---
+app.get('/api/smart-plan/:email', async (req, res) => {
+    try {
+        const userEmail = req.params.email;
+        const user = await User.findOne({ email: userEmail });
+
+        if (!user || !user.goal) {
+            return res.json({ goal: "Not Set", meals: [], workouts: [] });
+        }
+
+        const suggestedMeals = await Meal.find({ goal: user.goal }).limit(3);
+        const suggestedWorkouts = await Workout.find({ goal: user.goal }).limit(3);
+
+        res.json({ goal: user.goal, meals: suggestedMeals, workouts: suggestedWorkouts });
+    } catch (err) { res.status(500).json({ error: "Internal Server Error" }); }
+});
+
+// --- PROFILE UPDATE ---
+app.put('/api/profile/update', async (req, res) => {
+    try {
+        const { email, currentWeight, goal } = req.body;
+        const user = await User.findOneAndUpdate(
+            { email: email },
+            { weight: currentWeight, goal: goal },
+            { new: true }
+        );
+        if (!user) return res.status(404).json({ error: "User not found" });
+        res.json({ message: "Updated!", user });
+    } catch (err) { res.status(500).json({ error: "Update failed" }); }
+});
+
+// --- SEED ROUTE ---
 app.get('/api/seed-meals', async (req, res) => {
     try {
-        // 1. Wipe the old database clean
         await Meal.deleteMany({});
-
-        // 2. The complete meal list for ALL goals
+        await Workout.deleteMany({});
+        
         const sampleMeals = [
-            // Lose Weight Meals
-            { name: "Boiled eggs with cucumber", type: "breakfast", goal: "Lose Weight" },
-            { name: "Grilled chicken salad", type: "lunch", goal: "Lose Weight" },
-            { name: "Baked white fish with steamed broccoli", type: "dinner", goal: "Lose Weight" },
-            { name: "A green apple", type: "snack", goal: "Lose Weight" },
-
-            // Build Muscle Meals
-            { name: "Oatmeal with protein powder", type: "breakfast", goal: "Build Muscle" },
-            { name: "Large portion of Shish Tawook", type: "lunch", goal: "Build Muscle" },
-            { name: "Lean steak with sweet potatoes", type: "dinner", goal: "Build Muscle" },
-            { name: "High-protein fruit smoothie", type: "snack", goal: "Build Muscle" },
-
-            // Maintain Weight Meals
-            { name: "Ful Medames with olive oil and pita", type: "breakfast", goal: "Maintain Weight" },
-            { name: "Lentil soup with mixed greens", type: "lunch", goal: "Maintain Weight" },
-            { name: "Grilled chicken breast with quinoa", type: "dinner", goal: "Maintain Weight" },
-            { name: "Greek yogurt with honey", type: "snack", goal: "Maintain Weight" }
+            { name: "Egg & Spinach Scramble", type: "breakfast", goal: "Lose Weight" },
+            { name: "Avocado & Chicken Wrap", type: "lunch", goal: "Lose Weight" },
+            { name: "Giant Protein Oats", type: "breakfast", goal: "Build Muscle" },
+            { name: "Steak & Mashed Potato", type: "dinner", goal: "Build Muscle" },
+            { name: "Mediterranean Pasta", type: "lunch", goal: "Maintain Weight" }
         ];
 
-        // 3. Insert the fresh data
+        const sampleWorkouts = [
+            { type: "HIIT Fat Burner", duration: 25, goal: "Lose Weight" },
+            { type: "Morning Run", duration: 30, goal: "Lose Weight" },
+            { type: "Upper Body Hypertrophy", duration: 60, goal: "Build Muscle" },
+            { type: "Deadlift Max Strength", duration: 45, goal: "Build Muscle" },
+            { type: "Yoga Flow", duration: 40, goal: "Maintain Weight" }
+        ];
+
         await Meal.insertMany(sampleMeals);
-        
-        res.json({ message: "SUCCESS: Database Wiped and Re-Seeded with ALL meals!" });
+        await Workout.insertMany(sampleWorkouts);
+        res.json({ message: "Database Seeded!" });
+    } catch (err) { res.status(500).json({ error: "Seed failed" }); }
+});
+// --- COMPLEMENTARY PURGE PATHWAY FOR RECENT WORKOUTS ---
+app.delete('/api/workouts/:id', async (req, res) => {
+    try {
+        const removedWorkout = await Workout.findByIdAndDelete(req.params.id);
+        if (!removedWorkout) return res.status(404).json({ error: "Workout log file not found" });
+        res.json({ message: "Workout entry removed successfully from MongoDB!" });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to seed database" });
+        res.status(500).json({ error: "System failed to process resource clearance" });
     }
 });
-// This is the crucial block that keeps the server awake!
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-});
+
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
