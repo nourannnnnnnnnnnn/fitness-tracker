@@ -25,6 +25,32 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('Successfully connected to MongoDB!'))
     .catch((err) => console.error('MongoDB connection error:', err));
 
+// --- SECURITY MIDDLEWARE (NEW) ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (!token) return res.status(401).json({ error: "Access Denied" });
+
+    // Ensure you have JWT_SECRET in your .env file
+    jwt.verify(token, process.env.JWT_SECRET || 'supersecretkey', (err, decoded) => {
+        if (err) return res.status(403).json({ error: "Invalid Token" });
+        req.user = decoded; // The decoded token contains the user's ID
+        next();
+    });
+};
+
+const requireAdmin = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user || user.role !== 'admin') {
+            return res.status(403).json({ error: "Admin access required" });
+        }
+        next();
+    } catch (err) {
+        res.status(500).json({ error: "Authorization failed" });
+    }
+};
+
 // --- AUTH ROUTES ---
 app.post('/api/register', async (req, res) => {
     try {
@@ -52,9 +78,39 @@ app.post('/api/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(400).json({ error: "Invalid email or password" });
 
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || 'supersecretkey', { expiresIn: '1h' });
         res.json({ token, role: user.role, email: user.email, message: "Logged in!" });
     } catch (err) { res.status(500).json({ error: "Login failed" }); }
+});
+
+// --- ADMIN ROUTES (NEW) ---
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const users = await User.find({}, '-password'); // Fetches all users securely without their passwords
+        res.json(users);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/add-meal', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const newMeal = new Meal(req.body);
+        await newMeal.save();
+        res.status(201).json(newMeal);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/admin/meals/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const updatedMeal = await Meal.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        res.json(updatedMeal);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admin/meals/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        await Meal.findByIdAndDelete(req.params.id);
+        res.json({ message: 'Meal deleted successfully' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- WORKOUT ROUTES ---
@@ -71,6 +127,16 @@ app.post('/api/workouts', async (req, res) => {
         await newWorkout.save();
         res.status(201).json(newWorkout);
     } catch (err) { res.status(400).json({ error: 'Failed to save workout' }); }
+});
+
+app.delete('/api/workouts/:id', async (req, res) => {
+    try {
+        const removedWorkout = await Workout.findByIdAndDelete(req.params.id);
+        if (!removedWorkout) return res.status(404).json({ error: "Workout log file not found" });
+        res.json({ message: "Workout entry removed successfully from MongoDB!" });
+    } catch (err) {
+        res.status(500).json({ error: "System failed to process resource clearance" });
+    }
 });
 
 // --- COMMUNITY DISCOVERY & TEXT REVIEWS SEARCH ---
@@ -106,7 +172,7 @@ app.get('/api/meals/search', async (req, res) => {
     }
 });
 
-// --- TRANSACTIONAL RATING & REVIEW ENGINE (FIXED INSTANT SYNC) ---
+// --- TRANSACTIONAL RATING & REVIEW ENGINE ---
 app.post('/api/meals/rate', async (req, res) => {
     try {
         const { email, mealId, score } = req.body;
@@ -133,20 +199,15 @@ app.post('/api/meals/rate', async (req, res) => {
             meal.ratings.push({ email: cleanEmail, score: Number(score) }); 
         }
 
-        // Explicitly notify Mongoose that the nested array properties have altered
         meal.markModified('ratings');
-        
-        // Enforce await constraint to fully finalize database indexing changes before response delivery
         await meal.save();
         console.log("Review committed to MongoDB successfully!");
 
-        // Build a fresh text reviews array using the newly updated data block
         const freshReviewsList = meal.ratings.map(r => {
             const username = r.email ? r.email.split('@')[0] : "Anonymous";
             return `${username} rated this ${r.score} stars`;
         });
 
-        // Send back the brand new attributes directly in the payload to allow instant UI mutations
         res.json({ 
             message: "Review updated successfully!",
             reviewsList: freshReviewsList,
@@ -180,7 +241,6 @@ app.post('/api/favorites/toggle', async (req, res) => {
             user.favoriteMeals = [];
         }
 
-        // Structural ObjectId evaluation casting constraint guard
         const mealIndex = user.favoriteMeals.findIndex(id => id.toString() === mealId.toString());
 
         if (mealIndex >= 0) {
@@ -268,16 +328,6 @@ app.get('/api/seed-meals', async (req, res) => {
         await Workout.insertMany(sampleWorkouts);
         res.json({ message: "Database Seeded!" });
     } catch (err) { res.status(500).json({ error: "Seed failed" }); }
-});
-// --- COMPLEMENTARY PURGE PATHWAY FOR RECENT WORKOUTS ---
-app.delete('/api/workouts/:id', async (req, res) => {
-    try {
-        const removedWorkout = await Workout.findByIdAndDelete(req.params.id);
-        if (!removedWorkout) return res.status(404).json({ error: "Workout log file not found" });
-        res.json({ message: "Workout entry removed successfully from MongoDB!" });
-    } catch (err) {
-        res.status(500).json({ error: "System failed to process resource clearance" });
-    }
 });
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));

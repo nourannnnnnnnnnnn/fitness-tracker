@@ -4,7 +4,7 @@ function AdminDashboard() {
   const [users, setUsers] = useState([]);
   const [meals, setMeals] = useState([]);
   const [newMeal, setNewMeal] = useState({ name: '', type: 'breakfast', goal: 'Lose Weight' });
-  const [editingId, setEditingId] = useState(null); // Track which meal is being edited
+  const [editingId, setEditingId] = useState(null); 
 
   useEffect(() => {
     fetchUsers();
@@ -12,47 +12,72 @@ function AdminDashboard() {
   }, []);
 
   const fetchUsers = async () => {
-    const res = await fetch('http://localhost:5000/api/admin/users');
-    const data = await res.json();
-    setUsers(data);
+    try {
+      const token = localStorage.getItem('token'); 
+      const res = await fetch('http://localhost:5000/api/admin/users', {
+        headers: { 'Authorization': `Bearer ${token}` } 
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUsers(data);
+      } else {
+        console.error("Not authorized to fetch users");
+      }
+    } catch (err) {
+      console.error("Failed to fetch users", err);
+    }
   };
 
   const fetchMeals = async () => {
-    const res = await fetch('http://localhost:5000/api/meals/search?q=');
-    const data = await res.json();
-    setMeals(data);
+    try {
+      const res = await fetch('http://localhost:5000/api/meals/search?q=');
+      const data = await res.json();
+      setMeals(data);
+    } catch (err) {
+      console.error("Failed to fetch meals", err);
+    }
   };
 
   const handleAddOrUpdateMeal = async (e) => {
     e.preventDefault();
     const url = editingId 
-      ? `http://localhost:5000/api/admin/meals/${editingId}` // We'd need a PUT route for real editing
-      : 'http://localhost:5000/api/admin/add-meal';
+      ? `http://localhost:5000/api/admin/meals/${editingId}` 
+      : 'http://localhost:5000/api/admin/add-meal'; 
     
     const method = editingId ? 'PUT' : 'POST';
+    const token = localStorage.getItem('token');
 
     try {
       const res = await fetch(url, {
         method: method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}` 
+        },
         body: JSON.stringify(newMeal)
       });
       if (res.ok) {
         alert(editingId ? "✅ Meal Updated!" : "🍲 Meal Added!");
         resetForm();
         fetchMeals();
+      } else {
+        alert("Server rejected the request. Check your admin permissions.");
       }
     } catch (err) { alert("Error processing meal"); }
   };
 
   const deleteMeal = async (id) => {
     if (window.confirm("Are you sure you want to delete this meal?")) {
+      const token = localStorage.getItem('token');
       try {
         const res = await fetch(`http://localhost:5000/api/admin/meals/${id}`, {
           method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` } 
         });
         if (res.ok) {
           fetchMeals();
+        } else {
+          alert("Unauthorized to delete this meal.");
         }
       } catch (err) { alert("Delete failed"); }
     }
